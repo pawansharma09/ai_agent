@@ -11,19 +11,18 @@ from dotenv import load_dotenv
 # --- LangChain Imports ---
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS # <-- NEW: Using FAISS
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_community.vectorstores import FAISS
+from langchain.agents import create_tool_calling_agent, AgentExecutor, Tool # <-- CORRECTED IMPORT
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.tools.retriever import create_retriever_tool
-from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_community.utilities import GoogleSerperAPIWrapper
 
 # --- PAGE CONFIGURATION & API KEY LOADING ---
 st.set_page_config(page_title="Free Agentic RAG Assistant", layout="wide")
 load_dotenv()
 
-# Check for API keys in environment variables (Pinecone key removed)
+# Check for API keys
 required_keys = ["GOOGLE_API_KEY", "SERPER_API_KEY", "DEEPGRAM_API_KEY"]
 missing_keys = [key for key in required_keys if not os.getenv(key)]
 
@@ -45,7 +44,7 @@ def process_document(uploaded_file):
     texts = []
     images = []
     
-    vision_model = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", max_tokens=1024)
+    vision_model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", max_tokens=1024)
     embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
     for page_num, page in enumerate(doc):
@@ -72,7 +71,6 @@ def process_document(uploaded_file):
 
     combined_docs = texts + images
     
-    # --- CRITICAL CHANGE: Create FAISS vector store instead of Pinecone ---
     vectorstore = FAISS.from_texts(
         texts=[d['text'] for d in combined_docs],
         embedding=embeddings_model,
@@ -89,7 +87,7 @@ def get_page_image(file_bytes, page_number):
     return Image.open(io.BytesIO(img_bytes))
 
 # --- AGENT SETUP ---
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", "You are a helpful assistant. You answer questions based on the provided document and can also search the web. For any information retrieved from the document, you MUST cite the page number. When a user asks a question, first decide if you should search the web or the document. If the user asks for current events or general knowledge, use the web search. If the user asks about the content of the uploaded document, use the retriever."),
@@ -97,10 +95,16 @@ prompt = ChatPromptTemplate.from_messages([
     ("placeholder", "{agent_scratchpad}"),
 ])
 
+# --- CORRECTED WEB SEARCH TOOL SETUP ---
+# This now correctly uses your SERPER_API_KEY without referencing Tavily.
 search = GoogleSerperAPIWrapper()
-web_search_tool = st.cache_resource(lambda: TavilySearchResults(api_wrapper=search))()
-web_search_tool.name = "web_search"
-web_search_tool.description = "Searches the web for real-time information."
+web_search_tool = Tool(
+    name="web_search",
+    description="Searches the web for real-time information.",
+    func=search.run
+)
+# --- END OF CORRECTION ---
+
 
 # --- UI RENDERING ---
 st.title("🎙️ Agentic RAG Assistant (Free Tools Version)")
