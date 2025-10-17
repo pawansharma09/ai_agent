@@ -1,0 +1,10 @@
+streamlit
+langchain 
+langchain-google-genai 
+langchain-community 
+pinecone-client 
+deepgram-sdk
+google-search-results 
+pymupdf 
+Pillow 
+sentence-transformers
