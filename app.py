@@ -2,7 +2,7 @@ import os, io, json, base64, requests, fitz
 import streamlit as st
 from PIL import Image
 from sentence_transformers import SentenceTransformer
-from deepgram import Deepgram
+from deepgram import DeepgramClient
 import google.generativeai as genai
 import numpy as np
 
