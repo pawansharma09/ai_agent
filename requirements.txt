@@ -8,3 +8,4 @@ google-search-results
 pymupdf 
 Pillow 
 sentence-transformers
+pinecone
