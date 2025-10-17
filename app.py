@@ -23,7 +23,7 @@ if not all([DG_KEY, SERPER_KEY, GEN_KEY]):
 # ---------- INIT ----------
 embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 genai.configure(api_key=GEN_KEY)
-dg = Deepgram(DG_KEY)
+dg = DeepgramClient(DG_KEY)
 
 # Local in-memory store
 if "vectors" not in st.session_state:
