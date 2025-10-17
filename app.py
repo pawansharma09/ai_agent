@@ -11,9 +11,9 @@ st.set_page_config(page_title="Agentic Voice RAG Bot", layout="wide")
 st.title("🎙️ Multi-Modal Agentic RAG Chatbot")
 
 # Load API keys from Streamlit secrets
-DG_KEY = st.secrets.get("DEEPGRAM_API_KEY")
-SERPER_KEY = st.secrets.get("SERPER_API_KEY")
-GEN_KEY = st.secrets.get("GEMINI_API_KEY")
+DG_KEY = st.secrets["DEEPGRAM_API_KEY"]
+SERPER_KEY = st.secrets["SERPER_API_KEY"]
+GEN_KEY = st.secrets["GEMINI_API_KEY"]
 # PC_KEY is not used, so we can comment it out or handle it similarly if needed
 # PC_KEY = st.secrets.get("PINECONE_API_KEY") 
 
