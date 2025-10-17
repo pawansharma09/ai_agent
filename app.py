@@ -4,46 +4,32 @@ import streamlit as st
 import os
 import fitz  # PyMuPDF
 import base64
-import pinecone
 from PIL import Image
 import io
 from dotenv import load_dotenv
 
 # --- LangChain Imports ---
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.embeddings import HuggingFaceEmbeddings # <-- NEW: Using Hugging Face
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS # <-- NEW: Using FAISS
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain.tools.retriever import create_retriever_tool
 from langchain_community.tools.tavily_search import TavilySearchResults
-from langchain_pinecone import PineconeVectorStore
 from langchain_community.utilities import GoogleSerperAPIWrapper
 
 # --- PAGE CONFIGURATION & API KEY LOADING ---
-st.set_page_config(page_title="Agentic RAG Assistant", layout="wide")
+st.set_page_config(page_title="Free Agentic RAG Assistant", layout="wide")
 load_dotenv()
 
-# Check for API keys in environment variables
-required_keys = ["GOOGLE_API_KEY", "PINECONE_API_KEY", "SERPER_API_KEY", "DEEPGRAM_API_KEY"]
+# Check for API keys in environment variables (Pinecone key removed)
+required_keys = ["GOOGLE_API_KEY", "SERPER_API_KEY", "DEEPGRAM_API_KEY"]
 missing_keys = [key for key in required_keys if not os.getenv(key)]
 
 if missing_keys:
     st.error(f"Missing API keys for: {', '.join(missing_keys)}. Please add them to your .env file.")
     st.stop()
-
-# Initialize Pinecone
-pinecone_api_key = os.getenv("PINECONE_API_KEY")
-pinecone.init(api_key=pinecone_api_key)
-INDEX_NAME = "multimodal-rag-index-hf" # Using a new index name for the new embedding model
-
-# --- CRITICAL CHANGE: Update Pinecone index dimension for Hugging Face model ---
-# all-MiniLM-L6-v2 has a dimension of 384
-DIMENSION = 384
-if INDEX_NAME not in pinecone.list_indexes():
-    st.info(f"Creating new Pinecone index '{INDEX_NAME}' with dimension {DIMENSION}...")
-    pinecone.create_index(name=INDEX_NAME, dimension=DIMENSION, metric="cosine")
-    st.success(f"Pinecone index '{INDEX_NAME}' created successfully.")
 
 # --- CORE FUNCTIONS ---
 
@@ -51,7 +37,7 @@ if INDEX_NAME not in pinecone.list_indexes():
 def process_document(uploaded_file):
     """
     Processes the uploaded PDF: extracts text and images, generates image summaries,
-    creates embeddings using Hugging Face, and upserts them into Pinecone.
+    creates embeddings using Hugging Face, and builds a local FAISS vector store.
     """
     file_bytes = uploaded_file.getvalue()
     doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -59,9 +45,7 @@ def process_document(uploaded_file):
     texts = []
     images = []
     
-    # Use Gemini 1.5 Pro for vision tasks
-    vision_model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", max_tokens=1024)
-    # Use local Hugging Face model for embeddings
+    vision_model = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", max_tokens=1024)
     embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
     for page_num, page in enumerate(doc):
@@ -88,12 +72,11 @@ def process_document(uploaded_file):
 
     combined_docs = texts + images
     
-    # Upsert to Pinecone
-    vectorstore = PineconeVectorStore.from_texts(
+    # --- CRITICAL CHANGE: Create FAISS vector store instead of Pinecone ---
+    vectorstore = FAISS.from_texts(
         texts=[d['text'] for d in combined_docs],
         embedding=embeddings_model,
-        metadatas=[d['metadata'] for d in combined_docs],
-        index_name=INDEX_NAME
+        metadatas=[d['metadata'] for d in combined_docs]
     )
     return vectorstore, file_bytes
 
@@ -106,8 +89,7 @@ def get_page_image(file_bytes, page_number):
     return Image.open(io.BytesIO(img_bytes))
 
 # --- AGENT SETUP ---
-# Use Gemini 1.5 Pro as the agent's brain
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", "You are a helpful assistant. You answer questions based on the provided document and can also search the web. For any information retrieved from the document, you MUST cite the page number. When a user asks a question, first decide if you should search the web or the document. If the user asks for current events or general knowledge, use the web search. If the user asks about the content of the uploaded document, use the retriever."),
@@ -115,15 +97,14 @@ prompt = ChatPromptTemplate.from_messages([
     ("placeholder", "{agent_scratchpad}"),
 ])
 
-# Tool 1: Web Search
 search = GoogleSerperAPIWrapper()
 web_search_tool = st.cache_resource(lambda: TavilySearchResults(api_wrapper=search))()
 web_search_tool.name = "web_search"
 web_search_tool.description = "Searches the web for real-time information."
 
 # --- UI RENDERING ---
-st.title("🎙️ Voice-Enabled Agentic RAG Assistant")
-st.markdown("Upload a PDF and ask questions using your voice or by typing. The assistant will search the document (text and images) and the web, providing cited answers and source pages.")
+st.title("🎙️ Agentic RAG Assistant (Free Tools Version)")
+st.markdown("This version uses FAISS for local vector storage and a Hugging Face model for embeddings, requiring no paid vector database.")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
