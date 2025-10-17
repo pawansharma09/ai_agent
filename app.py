@@ -1,182 +1,151 @@
-# app.py
-
+import os, io, json, base64, requests, fitz
 import streamlit as st
-import os
-import fitz  # PyMuPDF
-import base64
 from PIL import Image
-import io
-from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+from deepgram import Deepgram
+import google.generativeai as genai
+import numpy as np
 
-# --- LangChain Imports ---
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.agents import create_tool_calling_agent, AgentExecutor, Tool # <-- CORRECTED IMPORT
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain.tools.retriever import create_retriever_tool
-from langchain_community.utilities import GoogleSerperAPIWrapper
+# ---------- CONFIG ----------
+st.set_page_config(page_title="Agentic Voice RAG Bot", layout="wide")
+st.title("🎙️ Multi-Modal Agentic RAG Chatbot")
 
-# --- PAGE CONFIGURATION & API KEY LOADING ---
-st.set_page_config(page_title="Free Agentic RAG Assistant", layout="wide")
-load_dotenv()
+# Load API keys (Pinecone optional)
+DG_KEY = os.getenv("DEEPGRAM_API_KEY")
+SERPER_KEY = os.getenv("SERPER_API_KEY")
+GEN_KEY = os.getenv("GEMINI_API_KEY")
+PC_KEY = os.getenv("PINECONE_API_KEY")  # not used for index, just kept for compatibility
 
-# Check for API keys
-required_keys = ["GOOGLE_API_KEY", "SERPER_API_KEY", "DEEPGRAM_API_KEY"]
-missing_keys = [key for key in required_keys if not os.getenv(key)]
-
-if missing_keys:
-    st.error(f"Missing API keys for: {', '.join(missing_keys)}. Please add them to your .env file.")
+if not all([DG_KEY, SERPER_KEY, GEN_KEY]):
+    st.warning("Please set DEEPGRAM_API_KEY, SERPER_API_KEY, GEMINI_API_KEY before running.")
     st.stop()
 
-# --- CORE FUNCTIONS ---
+# ---------- INIT ----------
+embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+genai.configure(api_key=GEN_KEY)
+dg = Deepgram(DG_KEY)
 
-@st.cache_resource(show_spinner="Analyzing Document...")
-def process_document(uploaded_file):
-    """
-    Processes the uploaded PDF: extracts text and images, generates image summaries,
-    creates embeddings using Hugging Face, and builds a local FAISS vector store.
-    """
-    file_bytes = uploaded_file.getvalue()
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    
-    texts = []
-    images = []
-    
-    vision_model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", max_tokens=1024)
-    embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+# Local in-memory store
+if "vectors" not in st.session_state:
+    st.session_state.vectors = []  # list of (embedding, metadata)
 
-    for page_num, page in enumerate(doc):
-        page_text = page.get_text()
-        if page_text:
-            texts.append({"text": page_text, "metadata": {"page": page_num + 1}})
+# ---------- HELPERS ----------
+def extract_pdf(pdf_bytes):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pages = []
+    for i, page in enumerate(doc):
+        text = page.get_text("text")
+        imgs = []
+        for img in page.get_images(full=True):
+            base = doc.extract_image(img[0])
+            imgs.append(Image.open(io.BytesIO(base["image"])))
+        pages.append({"num": i + 1, "text": text, "images": imgs})
+    return pages
 
-        for img_index, img in enumerate(page.get_images(full=True)):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            
-            try:
-                img_summary_payload = [
-                    HumanMessage(content=[
-                        {"type": "text", "text": "Describe this image in detail. What information does it convey?"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode()}"}}
-                    ])
-                ]
-                summary_response = vision_model.invoke(img_summary_payload)
-                images.append({"text": summary_response.content, "metadata": {"page": page_num + 1, "image_index": img_index}})
-            except Exception as e:
-                st.warning(f"Could not analyze an image on page {page_num+1}. Skipping. Error: {e}")
+def chunk_pages(pages, chunk=500):
+    chunks = []
+    for p in pages:
+        words = p["text"].split()
+        for i in range(0, len(words), chunk):
+            seg = " ".join(words[i:i + chunk])
+            if seg.strip():
+                chunks.append({"text": seg, "page": p["num"]})
+    return chunks
 
-    combined_docs = texts + images
-    
-    vectorstore = FAISS.from_texts(
-        texts=[d['text'] for d in combined_docs],
-        embedding=embeddings_model,
-        metadatas=[d['metadata'] for d in combined_docs]
+def index_local(chunks):
+    vecs = []
+    for c in chunks:
+        emb = embed_model.encode(c["text"])
+        vecs.append((emb, c))
+    st.session_state.vectors = vecs
+
+def search_local(q, top_k=3):
+    q_emb = embed_model.encode(q)
+    scores = []
+    for emb, meta in st.session_state.vectors:
+        sim = np.dot(q_emb, emb) / (np.linalg.norm(q_emb) * np.linalg.norm(emb))
+        scores.append((sim, meta))
+    scores.sort(reverse=True, key=lambda x: x[0])
+    return [{"score": s, "text": m["text"], "page": m["page"]} for s, m in scores[:top_k]]
+
+def web_search(q):
+    r = requests.post(
+        "https://google.serper.dev/search",
+        headers={"X-API-KEY": SERPER_KEY, "Content-Type": "application/json"},
+        json={"q": q},
+        timeout=15
     )
-    return vectorstore, file_bytes
+    if r.status_code == 200:
+        j = r.json()
+        lines = []
+        for i in j.get("organic", [])[:3]:
+            lines.append(f"{i.get('title','')} — {i.get('link','')}")
+        return "\n".join(lines)
+    return "No web results."
 
-def get_page_image(file_bytes, page_number):
-    """Renders a specific page of the PDF as a PNG image."""
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    page = doc.load_page(page_number - 1)
-    pix = page.get_pixmap()
-    img_bytes = pix.tobytes("png")
-    return Image.open(io.BytesIO(img_bytes))
+def call_gemini(prompt):
+    model = genai.GenerativeModel("gemini-2.0-flash-exp")
+    res = model.generate_content(prompt)
+    return res.text
 
-# --- AGENT SETUP ---
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", temperature=0)
+def pdf_page_image(pdf_bytes, page_num):
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    page = doc.load_page(page_num - 1)
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+    return Image.open(io.BytesIO(pix.tobytes("png")))
 
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful assistant. You answer questions based on the provided document and can also search the web. For any information retrieved from the document, you MUST cite the page number. When a user asks a question, first decide if you should search the web or the document. If the user asks for current events or general knowledge, use the web search. If the user asks about the content of the uploaded document, use the retriever."),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
+def transcribe(audio_bytes):
+    res = dg.transcription.sync_prerecorded(
+        {"buffer": audio_bytes, "mimetype": "audio/wav"},
+        {"smart_format": True}
+    )
+    return res["results"]["channels"][0]["alternatives"][0]["transcript"]
 
-# --- CORRECTED WEB SEARCH TOOL SETUP ---
-# This now correctly uses your SERPER_API_KEY without referencing Tavily.
-search = GoogleSerperAPIWrapper()
-web_search_tool = Tool(
-    name="web_search",
-    description="Searches the web for real-time information.",
-    func=search.run
-)
-# --- END OF CORRECTION ---
+# ---------- UI ----------
+uploaded = st.sidebar.file_uploader("📄 Upload PDF (with text & images)", type=["pdf"])
+if uploaded:
+    pdf_data = uploaded.read()
+    pages = extract_pdf(pdf_data)
+    chunks = chunk_pages(pages)
+    index_local(chunks)
+    st.session_state["pdf_data"] = pdf_data
+    st.session_state["pages"] = pages
+    st.success(f"Indexed {len(chunks)} chunks from {len(pages)} pages.")
 
+st.header("🎧 Ask with your voice")
+audio = st.file_uploader("Upload or record question (wav/mp3)", type=["wav", "mp3"])
 
-# --- UI RENDERING ---
-st.title("🎙️ Agentic RAG Assistant (Free Tools Version)")
-st.markdown("This version uses FAISS for local vector storage and a Hugging Face model for embeddings, requiring no paid vector database.")
+if audio and "vectors" in st.session_state and st.session_state.vectors:
+    st.info("Transcribing your question...")
+    text = transcribe(audio.read())
+    st.write(f"**You said:** {text}")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.info("Retrieving context...")
+    pdf_hits = search_local(text)
+    web_hits = web_search(text)
 
-with st.sidebar:
-    st.header("1. Upload Document")
-    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
-    st.header("2. Ask a Question")
-    st.markdown("Use the text input or the (simulated) voice button in the main chat interface.")
+    prompt = f"""
+Answer this question using the provided data. Cite PDF pages as (Page X).
 
-if not uploaded_file:
-    st.info("Please upload a PDF document to begin.")
-    st.stop()
+Question: {text}
 
-vectorstore, file_bytes = process_document(uploaded_file)
-retriever = vectorstore.as_retriever(search_kwargs={'k': 3})
-retriever_tool = create_retriever_tool(retriever, "document_search", "Searches the uploaded PDF document for relevant information.")
+PDF excerpts:
+{json.dumps(pdf_hits, indent=2)}
 
-tools = [web_search_tool, retriever_tool]
+Web results:
+{web_hits}
+"""
+    st.info("Generating answer with Gemini 2.5 Flash...")
+    ans = call_gemini(prompt)
+    st.subheader("💬 Answer")
+    st.write(ans)
 
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+    st.subheader("📖 Citations")
+    for h in pdf_hits:
+        st.markdown(f"**Page {h['page']}** — similarity {h['score']:.2f}")
+        img = pdf_page_image(st.session_state["pdf_data"], h["page"])
+        st.image(img, use_column_width=True)
+else:
+    st.caption("Upload a PDF and then ask your question by voice!")
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if "citations" in message:
-            for citation in message["citations"]:
-                st.image(citation, caption=f"Source: Page {message['page_number']}", width=400)
-
-if st.button("🎤 (Simulated Voice Input)"):
-    st.session_state.user_prompt = st.text_input("I'm listening...", key=f"voice_input_{len(st.session_state.messages)}")
-
-prompt_input = st.chat_input("Or type your question here...")
-user_prompt = prompt_input or st.session_state.get('user_prompt')
-
-if user_prompt:
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
-    with st.chat_message("user"):
-        st.markdown(user_prompt)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking... (The agent is deciding which tool to use)"):
-            response = agent_executor.invoke({"input": user_prompt})
-            st.markdown(response["output"])
-            
-            citations = []
-            page_numbers = set()
-            if response.get("intermediate_steps"):
-                for step in response["intermediate_steps"]:
-                    if step[0].tool == 'document_search':
-                        for doc in step[1]:
-                            page_numbers.add(doc.metadata['page'])
-            
-            if page_numbers:
-                st.markdown("---")
-                st.subheader("Citations from Document:")
-                for page_num in sorted(list(page_numbers)):
-                    img = get_page_image(file_bytes, page_num)
-                    citations.append(img)
-                    st.image(img, caption=f"Source: Page {page_num}", width=500)
-            
-            assistant_message = {"role": "assistant", "content": response["output"]}
-            if citations:
-                assistant_message["citations"] = citations
-                assistant_message["page_number"] = sorted(list(page_numbers))[0]
-            
-            st.session_state.messages.append(assistant_message)
-    
-    if 'user_prompt' in st.session_state:
-        del st.session_state['user_prompt']
+st.sidebar.caption("Free-tier only: Deepgram • Serper • Gemini 2.5 Flash • Sentence Transformer (local)")
