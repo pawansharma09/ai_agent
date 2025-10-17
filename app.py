@@ -60,7 +60,7 @@ def process_document(uploaded_file):
     images = []
     
     # Use Gemini 1.5 Pro for vision tasks
-    vision_model = ChatGoogleGenerativeAI(model="gemini-1.5-pro-latest", max_tokens=1024)
+    vision_model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", max_tokens=1024)
     # Use local Hugging Face model for embeddings
     embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
