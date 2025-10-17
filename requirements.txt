@@ -2,7 +2,7 @@ streamlit
 langchain 
 langchain-google-genai 
 langchain-community 
-pinecone 
+langchain-pinecone 
 deepgram-sdk
 google-search-results 
 pymupdf 
