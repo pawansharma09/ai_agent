@@ -1,11 +1,8 @@
 streamlit
-langchain
-langchain-google-genai
-langchain-community
-faiss-cpu
-deepgram-sdk>=3.0
-google-search-results
-pymupdf
-python-dotenv
-Pillow
+deepgram-sdk
+google-generativeai
 sentence-transformers
+PyMuPDF
+Pillow
+requests
+numpy
